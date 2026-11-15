@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect EZ-Leads</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f4f4f5; color: #18181b; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { width: min(440px, calc(100% - 32px)); background: #fff; border: 1px solid #e4e4e7; border-radius: 12px; padding: 28px; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  p { margin: 0 0 14px; color: #3f3f46; line-height: 1.45; }
+  label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  input { width: 100%; box-sizing: border-box; border: 1px solid #d4d4d8; border-radius: 8px; padding: 10px 12px; font-size: 16px; }
+  button { border: 0; border-radius: 8px; padding: 10px 14px; font-weight: 600; cursor: pointer; }
+  .primary { background: #18181b; color: #fff; }
+  .ghost { background: #f4f4f5; color: #18181b; }
+  .row { display: flex; gap: 8px; margin-top: 14px; }
+  .status { min-height: 20px; font-size: 14px; color: #b45309; }
+  .hidden { display: none; }
+  .who { font-size: 14px; color: #3f3f46; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Connect EZ-Leads</h1>
+  <p id="intro">Enter the work email on your EZ-Leads profile. We will email you a sign-in code.</p>
+  <form id="email-form">
+    <label for="email">Work email</label>
+    <input id="email" type="email" autocomplete="email" required="required"/>
+    <div class="row"><button class="primary" type="submit">Email me a code</button></div>
+  </form>
+  <form id="code-form" class="hidden">
+    <label for="code">Sign-in code</label>
+    <input id="code" inputmode="numeric" autocomplete="one-time-code" required="required"/>
+    <div class="row"><button class="primary" type="submit">Continue</button></div>
+  </form>
+  <section id="consent" class="hidden">
+    <p class="who" id="who"></p>
+    <p id="ask"></p>
+    <div class="row">
+      <button class="primary" id="approve" type="button">Approve</button>
+      <button class="ghost" id="deny" type="button">Deny</button>
+    </div>
+  </section>
+  <p class="status" id="status" role="status"></p>
+</main>
+<script type="module">
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.81.1/+esm';
+const config = {"url":"https://rpomvscdhabuiwhigtsf.supabase.co","key":"sb_publishable_6kHPxYSyQpBqY6MZuvyPow_pUsc0do5","page":"https://danleviw.github.io/ez-leads-connect/"};
+const params = new URLSearchParams(location.search);
+const authorizationId = params.get('authorization_id') || '';
+const statusEl = document.querySelector('#status');
+const emailForm = document.querySelector('#email-form');
+const codeForm = document.querySelector('#code-form');
+const consent = document.querySelector('#consent');
+const setStatus = (text) => { statusEl.textContent = text || ''; };
+const show = (el) => el.classList.remove('hidden');
+const hide = (el) => el.classList.add('hidden');
+
+if (!config.url || !config.key) {
+  setStatus('Sign-in is not configured.');
+  hide(emailForm);
+} else if (!authorizationId) {
+  document.querySelector('#intro').textContent = 'This page opens when Claude or Cursor asks to connect EZ-Leads. Start again from that app.';
+  hide(emailForm);
+}
+
+const supabase = createClient(config.url, config.key, { auth: { persistSession: true, detectSessionInUrl: true, flowType: 'pkce' } });
+const redirectTo = config.page + '?authorization_id=' + encodeURIComponent(authorizationId);
+
+emailForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const email = document.querySelector('#email').value.trim().toLowerCase();
+  setStatus('Sending code...');
+  const { error } = await supabase.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: redirectTo, shouldCreateUser: true },
+  });
+  if (error) {
+    setStatus(error.message);
+    return;
+  }
+  sessionStorage.setItem('ez-leads-auth-email', email);
+  hide(emailForm);
+  show(codeForm);
+  document.querySelector('#intro').textContent = 'Enter the code from the email, or open the link in this same browser.';
+  setStatus('Code sent to ' + email + '.');
+});
+
+codeForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const email = sessionStorage.getItem('ez-leads-auth-email') || document.querySelector('#email').value.trim().toLowerCase();
+  const token = document.querySelector('#code').value.replace(/\\s/g, '');
+  setStatus('Checking code...');
+  let { error } = await supabase.auth.verifyOtp({ email, token, type: 'email' });
+  if (error) {
+    const second = await supabase.auth.verifyOtp({ email, token, type: 'magiclink' });
+    error = second.error;
+  }
+  if (error) {
+    setStatus(error.message);
+    return;
+  }
+  await showConsent();
+});
+
+document.querySelector('#approve').onclick = () => decide(true);
+document.querySelector('#deny').onclick = () => decide(false);
+
+const code = params.get('code');
+if (code) {
+  setStatus('Finishing sign-in...');
+  const { error } = await supabase.auth.exchangeCodeForSession(code);
+  if (error) setStatus(error.message);
+  else await showConsent();
+} else {
+  const { data } = await supabase.auth.getSession();
+  if (data.session) await showConsent();
+}
+
+async function showConsent() {
+  const { data: userData, error: userError } = await supabase.auth.getUser();
+  const email = (userData.user?.email || '').trim().toLowerCase();
+  if (userError || !email) {
+    setStatus('Sign in again.');
+    return;
+  }
+  const { data: rows, error } = await supabase
+    .from('employees')
+    .select('id, display_name, work_email, home_email')
+    .eq('is_active', true)
+    .or('work_email.ilike.' + email + ',home_email.ilike.' + email)
+    .limit(10);
+  const employee = (rows || []).find((row) =>
+    String(row.work_email || '').trim().toLowerCase() === email
+    || String(row.home_email || '').trim().toLowerCase() === email
+  );
+  if (error || !employee) {
+    hide(emailForm);
+    hide(codeForm);
+    setStatus('This email is not an active EZ-Leads employee.');
+    await supabase.auth.signOut();
+    return;
+  }
+  const { data, error: authError } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId);
+  if (authError || !data) {
+    setStatus(authError?.message || 'This connection request has expired. Start again from Claude or Cursor.');
+    return;
+  }
+  if (!('authorization_id' in data)) {
+    location.href = fixCallback(data.redirect_url);
+    return;
+  }
+  hide(emailForm);
+  hide(codeForm);
+  show(consent);
+  document.querySelector('#title').textContent = 'Approve ' + (data.client?.name || 'this app');
+  document.querySelector('#intro').textContent = 'The app will act as you in EZ-Leads. It can only see and change the leads you can already work.';
+  document.querySelector('#who').textContent = 'Signed in as ' + (employee.display_name || email) + ' (' + email + ').';
+  document.querySelector('#ask').textContent = data.scope ? 'Access requested: ' + data.scope : '';
+  setStatus('');
+}
+
+async function decide(approve) {
+  setStatus(approve ? 'Connecting...' : 'Cancelling...');
+  const result = approve
+    ? await supabase.auth.oauth.approveAuthorization(authorizationId, { skipBrowserRedirect: true })
+    : await supabase.auth.oauth.denyAuthorization(authorizationId, { skipBrowserRedirect: true });
+  const next = result.data?.redirect_url;
+  if (result.error || !next) {
+    setStatus(result.error?.message || 'Could not finish connecting. Start again from the app.');
+    return;
+  }
+  location.href = fixCallback(next);
+}
+
+function fixCallback(value) {
+  const url = new URL(value);
+  if (url.hostname === '0.0.0.0') url.hostname = '127.0.0.1';
+  return url.toString();
+}
+</script>
+</body>
+</html>
